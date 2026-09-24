@@ -71,7 +71,15 @@ readonly SMOKE_MARKER="rs: Hello, world!"
 # these appears instead of sitting out the whole boot timeout.
 readonly BOOT_FAILURE_PATTERN="panicked at|Attempted to kill init|Kernel panic|not syncing"
 
-readonly WORK_DIR="${DRAGONOS_WORK_DIR:-.dragonos/work}"
+# Docker rejects relative host paths for bind mounts, so resolve the work
+# directory against the current directory even when the caller leaves it at the
+# default relative value.
+WORK_DIR="${DRAGONOS_WORK_DIR:-.dragonos/work}"
+case "$WORK_DIR" in
+  /*) ;;
+  *) WORK_DIR="${PWD}/${WORK_DIR}" ;;
+esac
+readonly WORK_DIR
 readonly LOG_DIR="${QEMU_LOG_DIR:-qemu-logs}"
 readonly LOG_FILE="${LOG_DIR}/prototyper-dragonos-${BOOT_MODE}.log"
 readonly BOOT_TIMEOUT_SECS="${DRAGONOS_BOOT_TIMEOUT_SECS:-300}"
