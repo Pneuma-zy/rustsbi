@@ -1,13 +1,12 @@
-name: DragonOS bootloaders
+name: DragonOS
 
 on:
   pull_request:
     branches: ["main"]
     paths:
       - ".cargo/**"
-      - ".github/dragonos/**"
-      - ".github/scripts/*dragonos*"
-      - ".github/workflows/dragonos-bootloaders.yml"
+      - ".github/scripts/prototyper-dragonos-boot.sh"
+      - ".github/workflows/dragonos.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "rust-toolchain.toml"
@@ -20,9 +19,8 @@ on:
     branches: ["main"]
     paths:
       - ".cargo/**"
-      - ".github/dragonos/**"
-      - ".github/scripts/*dragonos*"
-      - ".github/workflows/dragonos-bootloaders.yml"
+      - ".github/scripts/prototyper-dragonos-boot.sh"
+      - ".github/workflows/dragonos.yml"
       - "Cargo.lock"
       - "Cargo.toml"
       - "rust-toolchain.toml"
@@ -43,11 +41,11 @@ jobs:
   dragonos-boot:
     name: Boot DragonOS (${{ matrix.boot-path }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        boot-path: [u-boot, edk2]
+        boot-path: [sbi, u-boot, edk2]
     steps:
       - name: Checkout RustSBI
         uses: actions/checkout@v7
@@ -65,13 +63,15 @@ jobs:
       - name: Install required cargo
         run: cargo install --locked cargo-binutils@0.4.0
 
-      # These inputs do not include RustSBI. Bump v1 when their build recipe
-      # changes, so a previous successful build cannot hide a broken recipe.
-      - name: Cache DragonOS EFI payload
+      # RustSBI is rebuilt every run. The pinned DragonOS source produces both
+      # the bare kernel image and the EFI payload containing that same kernel.
+      - name: Cache DragonOS kernel and EFI payload
         uses: actions/cache@v5
         with:
-          path: .cache/dragonos-bootloaders/bootriscv64.efi
-          key: dragonos-40572b45-stub-85156066-v1
+          path: |
+            .cache/dragonos-bootloaders/bootriscv64.efi
+            .cache/dragonos-bootloaders/dragonos-kernel.bin
+          key: dragonos-40572b45-stub-85156066-v2
 
       - name: Cache DragonOS musl cross toolchain archive
         uses: actions/cache@v5
@@ -98,11 +98,8 @@ jobs:
       - name: Build RustSBI Prototyper
         run: cargo prototyper build
 
-      - name: Prepare pinned DragonOS and bootloader inputs
-        run: bash .github/scripts/prepare-dragonos-bootloaders.sh "${{ matrix.boot-path }}"
-
       - name: Boot and exercise DragonOS userspace
-        run: python3 .github/scripts/prototyper-dragonos-bootloaders.py "${{ matrix.boot-path }}"
+        run: .github/scripts/prototyper-dragonos-boot.sh "${{ matrix.boot-path }}"
 
       - name: Upload serial logs and smoke result
         if: always()

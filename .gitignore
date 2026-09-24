@@ -15,6 +15,3 @@
 
 qemu-logs/
 /.openeuler-aia/
-/.cache/dragonos-bootloaders/
-/.dragonos/
-.github/scripts/__pycache__/
