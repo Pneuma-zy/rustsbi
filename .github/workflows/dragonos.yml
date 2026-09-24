@@ -1,0 +1,79 @@
+name: DragonOS
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - ".cargo/**"
+      - ".github/scripts/prototyper-dragonos-boot.sh"
+      - ".github/workflows/dragonos.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "xtask/**"
+      - "library/**"
+      - "firmware/macros/**"
+      - "firmware/prototyper/**"
+      - "firmware/runtime/**"
+  push:
+    branches: ["main"]
+    paths:
+      - ".cargo/**"
+      - ".github/scripts/prototyper-dragonos-boot.sh"
+      - ".github/workflows/dragonos.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "xtask/**"
+      - "library/**"
+      - "firmware/macros/**"
+      - "firmware/prototyper/**"
+      - "firmware/runtime/**"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  dragonos-boot:
+    name: Boot DragonOS (sbi)
+    runs-on: ubuntu-24.04
+    # Most of the time is spent building DragonOS inside its development
+    # container; the boot itself is quick.
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install dev dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-misc
+          qemu-system-riscv64 --version
+          docker --version
+
+      - name: Install required cargo
+        run: cargo install --locked cargo-binutils@0.4.0
+
+      - name: Build RustSBI Prototyper
+        run: cargo prototyper build
+
+      # The script builds DragonOS from the fork carrying the riscv64 fixes
+      # tracked in rustsbi/rustsbi#331 and boots it through the dynamic
+      # firmware in bare (sbi) mode; success is the init stub printing
+      # "rs: Hello, world!".
+      - name: Boot DragonOS
+        env:
+          DRAGONOS_BOOT_TIMEOUT_SECS: 600
+        run: .github/scripts/prototyper-dragonos-boot.sh
+
+      - name: Upload DragonOS serial log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dragonos-serial-log
+          path: qemu-logs/prototyper-dragonos-sbi.log
+          if-no-files-found: warn
