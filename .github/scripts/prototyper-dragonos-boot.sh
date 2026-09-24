@@ -54,9 +54,12 @@ case "$BOOT_MODE" in
     ;;
 esac
 
-readonly DRAGONOS_REPO="https://github.com/DragonOS-Community/DragonOS.git"
-readonly DRAGONOS_COMMIT="c917a92db9710be8e65c9fd60422c3ca44b0e88e"
-readonly DRAGONOS_DEV_IMAGE="dragonos/dragonos-dev:v1.23"
+# DragonOS currently cannot boot to userspace from an SBI firmware without the
+# riscv64 fixes in Pneuma-zy/DragonOS; use that fork until they land upstream
+# in DragonOS-Community/DragonOS, then switch the repo and commit back.
+readonly DRAGONOS_REPO="${DRAGONOS_REPO:-https://github.com/Pneuma-zy/DragonOS.git}"
+readonly DRAGONOS_COMMIT="${DRAGONOS_COMMIT:-d1981efbf9b93da75f04cfa2845c152924c4600f}"
+readonly DRAGONOS_DEV_IMAGE="${DRAGONOS_DEV_IMAGE:-dragonos/dragonos-dev:v1.23}"
 
 # The dynamic firmware accepts the kernel entry through the fw_dynamic info
 # structure; the bare path boots it as `-bios`.
@@ -147,12 +150,74 @@ prepare_dragonos() {
     return 1
   fi
 
-  # `make clean` first: a cached x86_64 build tree breaks the riscv64 build.
-  docker run --rm \
+  # The bare-boot smoke test only needs /bin/riscv_rust_init. Building the full
+  # default userspace pulls in C/C++ apps whose toolchain headers are incomplete
+  # in the development image, so install a minimal config set with just the init
+  # stub and build against it. The files live in the (throwaway) checkout.
+  mkdir -p "${source}/user/dadk/config/sets/ci-smoke"
+  cp "${source}"/user/dadk/config/sets/default/riscv_init-*.toml \
+    "${source}/user/dadk/config/sets/ci-smoke/"
+  printf '%s\n' \
+    '[metadata]' 'name = "ci-smoke"' 'arch = "riscv64"' '' \
+    '[rootfs]' 'fs_type = "fat32"' 'size = "2G"' 'partition = "mbr"' '' \
+    '[base]' 'image = ""' 'pull_policy = "if-not-present"' '' \
+    '[user]' 'config_dir = "user/dadk/config/sets/ci-smoke"' \
+    >"${source}/config/rootfs-manifests/ci-smoke.toml"
+
+  # Build the kernel and userspace inside the pinned development container.
+  # Two container-specific quirks are handled here:
+  #   * `make -C kernel all` also links DragonStub, which this checkout does not
+  #     carry, so it fails after producing bin/kernel/kernel.elf. The failure is
+  #     tolerated as long as the ELF exists.
+  #   * dadk's partition-based disk image cannot be created in the container: it
+  #     needs udev/loop-partition nodes, so it fails with "Partition not exist".
+  #     A partitionless whole-disk FAT32 image is assembled instead, which the
+  #     kernel mounts as the whole device.
+  # The container is privileged so `mount -o loop` works for the partitionless
+  # image (no partition node is needed for a whole-disk filesystem).
+  docker run --rm --privileged \
     -v "${source}:/workspace/DragonOS" \
     -w /workspace/DragonOS \
     "$DRAGONOS_DEV_IMAGE" \
-    bash -lc 'git submodule update --init --recursive --force && make clean && make ARCH=riscv64 build -j"$(nproc)"'
+    bash -lc '
+      set -euo pipefail
+      # The dev image installs the cross toolchains under /root/opt and only
+      # puts them on PATH from an interactive ~/.bashrc, which a non-interactive
+      # shell skips. Add them explicitly so the userspace build works.
+      for d in /root/opt/*/bin; do export PATH="$d:$PATH"; done
+      git submodule update --init --recursive --force
+      make clean
+      # `make -C kernel all` bypasses the top-level Makefile step `mkdir -p
+      # bin/kernel`, so create it here or the final objcopy cannot write the ELF.
+      mkdir -p bin/kernel
+      make ROOTFS_MANIFEST=ci-smoke ARCH=riscv64 prepare_rootfs_manifest
+      make -C kernel all ARCH=riscv64 -j"$(nproc)" || true
+      test -s bin/kernel/kernel.elf
+      make -C user all ARCH=riscv64 -j"$(nproc)"
+
+      img=bin/disk-image-riscv64.img
+      rm -f "$img"
+      dd if=/dev/zero of="$img" bs=1M count=2048 status=none
+      mkfs.vfat -F 32 -n DRAGONOS "$img" >/dev/null
+      mnt=$(mktemp -d)
+      mount -o loop "$img" "$mnt"
+      # The root directory must start with a file entry, so write the sysroot
+      # install marker (what dadk would have written) before the directories.
+      if [[ -f bin/sysroot/.dadk_install_marker ]]; then
+        cp -a bin/sysroot/.dadk_install_marker "$mnt/"
+      else
+        printf "manifest=default;layout=2\n" > "$mnt/.dadk_install_marker"
+      fi
+      cp -a bin/sysroot/bin "$mnt/"
+      [[ -d bin/sysroot/efi ]] && cp -a bin/sysroot/efi "$mnt/"
+      mkdir -p "$mnt/proc" "$mnt/dev" "$mnt/sys"
+      sync
+      umount "$mnt"
+      # The image is created by root inside the container. Hand it to the
+      # checkout owner and make it writable: QEMU opens the drive read-write.
+      chown --reference=/workspace/DragonOS "$img"
+      chmod 0644 "$img"
+    '
 
   DRAGONOS_KERNEL="${source}/bin/kernel/kernel.elf"
   DRAGONOS_DISK="${source}/bin/disk-image-riscv64.img"
