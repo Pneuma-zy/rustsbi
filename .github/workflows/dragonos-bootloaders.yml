@@ -1,0 +1,119 @@
+name: DragonOS bootloaders
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - ".cargo/**"
+      - ".github/dragonos/**"
+      - ".github/scripts/*dragonos*"
+      - ".github/workflows/dragonos-bootloaders.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "xtask/**"
+      - "library/**"
+      - "firmware/macros/**"
+      - "firmware/prototyper/**"
+      - "firmware/runtime/**"
+  push:
+    branches: ["main"]
+    paths:
+      - ".cargo/**"
+      - ".github/dragonos/**"
+      - ".github/scripts/*dragonos*"
+      - ".github/workflows/dragonos-bootloaders.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "xtask/**"
+      - "library/**"
+      - "firmware/macros/**"
+      - "firmware/prototyper/**"
+      - "firmware/runtime/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  dragonos-boot:
+    name: Boot DragonOS (${{ matrix.boot-path }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        boot-path: [u-boot, edk2]
+    steps:
+      - name: Checkout RustSBI
+        uses: actions/checkout@v7
+
+      - name: Install boot dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            acpica-tools bison build-essential device-tree-compiler \
+            dosfstools flex gcc-riscv64-linux-gnu libc6-dev-riscv64-cross git libssl-dev \
+            mtools nasm python3 python3-dev python3-setuptools \
+            qemu-system-misc swig util-linux uuid-dev xz-utils
+          qemu-system-riscv64 --version
+
+      - name: Install required cargo
+        run: cargo install --locked cargo-binutils@0.4.0
+
+      # These inputs do not include RustSBI. Bump v1 when their build recipe
+      # changes, so a previous successful build cannot hide a broken recipe.
+      - name: Cache DragonOS EFI payload
+        uses: actions/cache@v5
+        with:
+          path: .cache/dragonos-bootloaders/bootriscv64.efi
+          key: dragonos-40572b45-stub-85156066-v1
+
+      - name: Cache DragonOS musl cross toolchain archive
+        uses: actions/cache@v5
+        with:
+          path: .cache/dragonos-bootloaders/riscv64-linux-musl-cross-gcc-9.4.0.tar.xz
+          key: dragonos-musl-gcc-9.4.0-b3833579
+
+      - name: Cache U-Boot S-mode binary
+        if: matrix.boot-path == 'u-boot'
+        uses: actions/cache@v5
+        with:
+          path: .cache/dragonos-bootloaders/u-boot.bin
+          key: dragonos-uboot-2024.04-smode-v1
+
+      - name: Cache EDK II firmware volumes
+        if: matrix.boot-path == 'edk2'
+        uses: actions/cache@v5
+        with:
+          path: |
+            .cache/dragonos-bootloaders/RISCV_VIRT_CODE.fd
+            .cache/dragonos-bootloaders/RISCV_VIRT_VARS.fd
+          key: dragonos-edk2-6951dfe7-v1
+
+      - name: Build RustSBI Prototyper
+        run: cargo prototyper build
+
+      - name: Prepare pinned DragonOS and bootloader inputs
+        run: bash .github/scripts/prepare-dragonos-bootloaders.sh "${{ matrix.boot-path }}"
+
+      - name: Boot and exercise DragonOS userspace
+        run: python3 .github/scripts/prototyper-dragonos-bootloaders.py "${{ matrix.boot-path }}"
+
+      - name: Upload serial logs and smoke result
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dragonos-boot-${{ matrix.boot-path }}
+          path: |
+            qemu-logs/dragonos/${{ matrix.boot-path }}/uart.log
+            qemu-logs/dragonos/${{ matrix.boot-path }}/guest.log
+            qemu-logs/dragonos/${{ matrix.boot-path }}/qemu-stderr.log
+            qemu-logs/dragonos/${{ matrix.boot-path }}/result.json
+            qemu-logs/dragonos/${{ matrix.boot-path }}/command.json
+            qemu-logs/dragonos/${{ matrix.boot-path }}/dump-dtb.log
+          if-no-files-found: ignore
